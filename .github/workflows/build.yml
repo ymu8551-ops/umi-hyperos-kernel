@@ -210,6 +210,14 @@ jobs:
               scripts/config --file out/.config -d "$s" || true
             done
           fi
+          if [ "$KSU_SUSFS_MODE" = "on" ]; then
+            scripts/config --file out/.config -e KSU_SUSFS
+            for s in KSU_SUSFS_SUS_PATH KSU_SUSFS_SUS_MOUNT KSU_SUSFS_SUS_KSTAT KSU_SUSFS_SPOOF_UNAME KSU_SUSFS_ENABLE_LOG KSU_SUSFS_HIDE_KSU_SUSFS_SYMBOLS KSU_SUSFS_SPOOF_CMDLINE_OR_BOOTCONFIG KSU_SUSFS_OPEN_REDIRECT KSU_SUSFS_SUS_MAP; do
+              scripts/config --file out/.config -e "$s" || true
+            done
+            echo "[i] SUSFS config enabled:"
+            grep -c "CONFIG_KSU_SUSFS" out/.config || true
+          fi
           if [ "$KSU_KPM_MODE" = "off" ]; then
             scripts/config --file out/.config -d KPM || true
           fi
@@ -510,25 +518,15 @@ jobs:
 
           PY
           grep -n "feature req id=" KernelSU/kernel/policy/feature.c || true
-      - name: 8o. SUSFS 头文件对接（树内已集成 susfs，不打补丁）
+      - name: 8o. 校验 SUSFS 树内集成
         if: env.KSU_SUSFS_MODE == 'on'
         working-directory: kernel
         run: |
           set -x
-          ls -l fs/susfs.c include/linux/susfs.h
-          grep -q "susfs.o" fs/Makefile && echo "[ok] susfs 已在 fs/Makefile"
-          # 让 KSU 驱动看到内核侧 susfs 声明
-          if [ -f drivers/kernelsu/kernel_includes.h ]; then
-            grep -q "linux/susfs.h" drivers/kernelsu/kernel_includes.h || \
-              echo '#include <linux/susfs.h>' >> drivers/kernelsu/kernel_includes.h
-            tail -5 drivers/kernelsu/kernel_includes.h
-          fi
-          # 兜底：所有引用 susfs_ 的 KSU 源文件补 include
-          for f in $(grep -rl "susfs_" drivers/kernelsu --include=*.c --include=*.h 2>/dev/null); do
-            case "$f" in *kernel_includes.h) continue;; esac
-            grep -q "linux/susfs.h" "$f" || sed -i '1i #include <linux/susfs.h>' "$f"
-          done
-          echo "[i] 已补 include 的文件数: $(grep -rl 'linux/susfs.h' drivers/kernelsu | wc -l)"
+          ls -l fs/susfs.c include/linux/susfs.h include/linux/susfs_def.h
+          grep -q "susfs.o" fs/Makefile && echo "[ok] fs/Makefile 已含 susfs.o"
+          grep -n "CONFIG_KSU_SUSFS" drivers/kernelsu/kernel_includes.h | head -3
+          echo "[i] 说明：include 已有条件保护，靠 8c 打开 CONFIG 生效"
 
       - name: 8f. ccache 缓存
         uses: actions/cache@v4
