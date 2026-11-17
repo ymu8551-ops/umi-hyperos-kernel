@@ -6,7 +6,7 @@ on:
       ksu_ref:
         description: "builtin=手动hook树(A路线)；v3.0.0=main树(B路线)"
         required: true
-        default: "builtin"
+        default: "v3.0.0"
       hook_mode:
         description: "auto=保留exec/open/stat手动hook；off=全停用(配main树)"
         required: true
@@ -22,7 +22,7 @@ on:
       kprobe_mode:
         description: "on=自动开KPROBES/KRETPROBES/KPROBE_EVENTS(B路线)"
         required: true
-        default: "off"
+        default: "on"
         type: choice
         options: ["off", "on"]
       susfs_mode:
