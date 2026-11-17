@@ -1,6 +1,9 @@
 name: cmi-full-nova
 
 on:
+  push:
+    branches:
+      - main
   workflow_dispatch:
     inputs:
       ksu_ref:
@@ -56,6 +59,7 @@ jobs:
     runs-on: ubuntu-22.04
     timeout-minutes: 300
     env:
+      KERNEL_REF: ${{ github.event.inputs.kernel_ref || 'android15-lineage22-mod-upgrade-susfs' }}
       KSU_REF: ${{ github.event.inputs.ksu_ref }}
       HOOK_MODE: ${{ github.event.inputs.hook_mode }}
       HOOK_PATCH: ${{ github.event.inputs.hook_patch }}
@@ -64,12 +68,13 @@ jobs:
       KSU_KPM_MODE: ${{ github.event.inputs.kpm_mode }}
       VARIANT: ${{ github.event.inputs.variant }}
       KPM_PATCH: ${{ github.event.inputs.kpm_patch }}
+      KSU_SHA: ${{ github.event.inputs.ksu_sha || '329b7f59dc84d79ac27a3487cf21d90c01cdf656' }}
     steps:
       - name: 1. 拉内核源
         uses: actions/checkout@v4
         with:
           repository: liyafe1997/kernel_xiaomi_sm8250_mod
-          ref: android15-lineage22-mod
+          ref: ${{ env.KERNEL_REF }}
           path: kernel
           fetch-depth: 1
 
@@ -133,12 +138,12 @@ jobs:
           echo "===== trimmed tail (170-260) ====="
           sed -n "170,260p" build.sh || true
 
-      - name: 7. 预装 SukiSU-Ultra 驱动（f4863b20，与树 SUSFS v1.5.7 原生配对）
+      - name: 7. 预装 SukiSU-Nova 驱动（329b7f59，与 upgrade-susfs 分支 SUSFS v1.5.9 配对）
         id: s7
         working-directory: kernel
         run: |
           set -x
-          KSU_SHA=f4863b20cc8dc0f8cc67418980f022e43014b598
+          KSU_SHA=${{ env.KSU_SHA }}
           ok=0
           for i in 1 2 3; do
             rm -rf /tmp/ksu /tmp/ksu.tar.gz
@@ -150,10 +155,10 @@ jobs:
                && [ -d /tmp/ksu/kernel ]; then
               ok=1 && break
             fi
-            echo "[retry $i] ultra driver fetch failed"
+            echo "[retry $i] nova driver fetch failed"
             sleep 10
           done
-          test "$ok" = "1" || { echo "::error::Ultra 驱动下载失败"; exit 1; }
+          test "$ok" = "1" || { echo "::error::Nova 驱动下载失败"; exit 1; }
           rm -rf KernelSU
           mv /tmp/ksu KernelSU
           echo "===== driver version markers ====="
@@ -205,6 +210,69 @@ jobs:
           fi
           sed -n "1,6p" include/linux/static_call.h
 
+      - name: 8b2. 注入 susfs 4.19 补丁（namespace.c 两个新 API）
+        id: s8b2
+        working-directory: kernel
+        run: |
+          set -ex
+          python3 - <<'PY'
+          import re
+          p = "fs/namespace.c"
+          s = open(p, encoding="utf-8", errors="replace").read()
+
+          if "susfs_is_mnt_devname_ksu" in s and "susfs_run_try_umount_for_current_mnt_ns" in s:
+              print("[ok] 已是最新，无需注入")
+          else:
+              # 1) susfs_run_try_umount_for_current_mnt_ns（供 CMD_SUSFS_RUN_UMOUNT_FOR_CURRENT_MNT_NS）
+              if "void susfs_run_try_umount_for_current_mnt_ns" not in s:
+                  blk1 = """
+          #ifdef CONFIG_KSU_SUSFS_TRY_UMOUNT
+          extern void susfs_try_umount(uid_t target_uid);
+          void susfs_run_try_umount_for_current_mnt_ns(void) {
+          	struct mount *mnt;
+          	struct mnt_namespace *mnt_ns;
+
+          	mnt_ns = current->nsproxy->mnt_ns;
+          	namespace_lock();
+          	list_for_each_entry(mnt, &mnt_ns->list, mnt_list) {
+          		if (mnt->mnt.mnt_root->d_inode->i_state & INODE_STATE_SUS_MOUNT)
+          			change_mnt_propagation(mnt, MS_PRIVATE);
+          	}
+          	namespace_unlock();
+          	susfs_try_umount(current_uid().val);
+          }
+          #endif
+          """
+                  s = s + blk1
+                  print("[ok] 注入 susfs_run_try_umount_for_current_mnt_ns")
+
+              # 2) susfs_is_mnt_devname_ksu（判断挂载是否为 KSU magic mount）
+              if "bool susfs_is_mnt_devname_ksu" not in s:
+                  blk2 = """
+          #ifdef CONFIG_KSU_SUSFS
+          bool susfs_is_mnt_devname_ksu(struct path *path) {
+          	struct mount *mnt;
+
+          	if (path && path->mnt) {
+          		mnt = real_mount(path->mnt);
+          		if (mnt && mnt->mnt_devname && !strcmp(mnt->mnt_devname, "KSU"))
+          			return true;
+          	}
+          	return false;
+          }
+          #endif
+          """
+                  s = s + blk2
+                  print("[ok] 注入 susfs_is_mnt_devname_ksu")
+
+              open(p, "w", encoding="utf-8").write(s)
+          PY
+          echo "===== 注入结果 ====="
+          grep -n "susfs_is_mnt_devname_ksu\|susfs_run_try_umount_for_current_mnt_ns" fs/namespace.c || true
+          echo "===== 依赖符号是否存在 ====="
+          grep -rn "susfs_try_umount(" fs/susfs.c | head -3 || echo "[x] susfs_try_umount 缺失"
+          grep -n "INODE_STATE_SUS_MOUNT" include/linux/susfs_def.h | head -2 || echo "[x] INODE_STATE_SUS_MOUNT 缺失"
+
       - name: 8c. 生成附加配置脚本并挂到 build.sh
         id: s8c
         working-directory: kernel
@@ -218,17 +286,23 @@ jobs:
           [ -f out/.config ] || { echo "[x] out/.config missing before extra config"; exit 1; }
           if [ "$KSU_SUSFS_MODE" = "off" ]; then
             scripts/config --file out/.config -d KSU_SUSFS || true
-            for s in KSU_SUSFS_SUS_PATH KSU_SUSFS_SUS_MOUNT KSU_SUSFS_SUS_KSTAT KSU_SUSFS_SPOOF_UNAME KSU_SUSFS_ENABLE_LOG KSU_SUSFS_HIDE_KSU_SUSFS_SYMBOLS KSU_SUSFS_SPOOF_CMDLINE_OR_BOOTCONFIG KSU_SUSFS_OPEN_REDIRECT KSU_SUSFS_SUS_MAP KSU_SUSFS_PRIORITY_UID_FILTER; do
+            for s in KSU_SUSFS_SUS_PATH KSU_SUSFS_SUS_MOUNT KSU_SUSFS_SUS_KSTAT KSU_SUSFS_SPOOF_UNAME KSU_SUSFS_ENABLE_LOG KSU_SUSFS_HIDE_KSU_SUSFS_SYMBOLS KSU_SUSFS_SPOOF_CMDLINE_OR_BOOTCONFIG KSU_SUSFS_OPEN_REDIRECT KSU_SUSFS_SUS_MAP KSU_SUSFS_PRIORITY_UID_FILTER KSU_SUSFS_SUS_SU KSU_SUSFS_TRY_UMOUNT KSU_SUSFS_HAS_MAGIC_MOUNT; do
               scripts/config --file out/.config -d "$s" || true
             done
           fi
           if [ "$KSU_SUSFS_MODE" = "on" ]; then
             scripts/config --file out/.config -e KSU_SUSFS
-            for s in KSU_SUSFS_SUS_PATH KSU_SUSFS_SUS_MOUNT KSU_SUSFS_SUS_KSTAT KSU_SUSFS_SPOOF_UNAME KSU_SUSFS_ENABLE_LOG KSU_SUSFS_HIDE_KSU_SUSFS_SYMBOLS KSU_SUSFS_SPOOF_CMDLINE_OR_BOOTCONFIG KSU_SUSFS_OPEN_REDIRECT KSU_SUSFS_SUS_MAP; do
+            # 开启树内 SUSFS v1.5.9 支持的子选项
+            for s in KSU_SUSFS_SUS_PATH KSU_SUSFS_SUS_MOUNT KSU_SUSFS_AUTO_ADD_SUS_KSU_DEFAULT_MOUNT KSU_SUSFS_AUTO_ADD_SUS_BIND_MOUNT KSU_SUSFS_SUS_KSTAT KSU_SUSFS_TRY_UMOUNT KSU_SUSFS_AUTO_ADD_TRY_UMOUNT_FOR_BIND_MOUNT KSU_SUSFS_SPOOF_UNAME KSU_SUSFS_ENABLE_LOG KSU_SUSFS_HIDE_KSU_SUSFS_SYMBOLS KSU_SUSFS_SPOOF_CMDLINE_OR_BOOTCONFIG KSU_SUSFS_OPEN_REDIRECT KSU_SUSFS_HAS_MAGIC_MOUNT; do
               scripts/config --file out/.config -e "$s" || true
+            done
+            # 关闭只有新版 SUSFS(带 SID/sepolicy) 才实现的子选项：4.19 树内没有对应实现
+            for s in KSU_SUSFS_SUS_MAP KSU_SUSFS_PRIORITY_UID_FILTER KSU_SUSFS_SUS_SU; do
+              scripts/config --file out/.config -d "$s" || true
             done
             echo "[i] SUSFS config enabled:"
             grep -c "CONFIG_KSU_SUSFS" out/.config || true
+            grep "^CONFIG_KSU_SUSFS" out/.config || true
           fi
           if [ "$KSU_KPM_MODE" = "off" ]; then
             scripts/config --file out/.config -d KPM || true
@@ -530,7 +604,7 @@ jobs:
 
           PY
           grep -n "feature req id=" KernelSU/kernel/policy/feature.c || true
-      - name: 8o. 校验 SUSFS 树内集成 + 驱动配对
+      - name: 8o. 校验 SUSFS 树内集成 + 驱动配对 + 缺失符号
         if: env.KSU_SUSFS_MODE == 'on'
         working-directory: kernel
         run: |
@@ -538,10 +612,29 @@ jobs:
           ls -l fs/susfs.c include/linux/susfs.h include/linux/susfs_def.h
           grep -q "susfs.o" fs/Makefile && echo "[ok] fs/Makefile 已含 susfs.o"
           grep -m1 'SUSFS_VERSION' include/linux/susfs.h || true
-          echo "===== 驱动实际调用的 susfs 符号 ====="
-          grep -rho "susfs_[a-z0-9_]*(" drivers/kernelsu --include=*.c | sort -u | head -40
-          echo "===== 驱动里是否残留 v2 专有调用（应为空） ====="
-          grep -rn "susfs_add_sus_map\|susfs_enable_log\|susfs_get_enabled_features\|susfs_show_version\|susfs_set_priority_uid_filter\|susfs_start_sdcard_monitor_fn" drivers/kernelsu --include=*.c || echo "[ok] 无 v2 专有调用"
+          echo "===== 驱动调用 vs 树内声明（缺哪些） ====="
+          python3 - <<'PY2'
+          import re, os
+          decl = set()
+          if os.path.exists("include/linux/susfs.h"):
+              decl = set(re.findall(r'\b(susfs_[a-z0-9_]+)\s*\(', open("include/linux/susfs.h", encoding="utf-8", errors="replace").read()))
+          used = set(); defined = set()
+          for root, dirs, files in os.walk("drivers/kernelsu"):
+              for f in files:
+                  if not f.endswith(".c"): continue
+                  s = open(os.path.join(root, f), encoding="utf-8", errors="replace").read()
+                  used |= set(re.findall(r'\b(susfs_[a-z0-9_]+)\s*\(', s))
+                  defined |= set(re.findall(r'\**\s*(susfs_[a-z0-9_]+)\s*\([^;{]*?\)\s*\{', s, re.S))
+          need = sorted(x for x in used if x not in defined and x != "susfs_extension")
+          missing = sorted(x for x in need if x not in decl)
+          print("驱动需外部 susfs 符号:", len(need))
+          print("树内 susfs.h 未声明:", missing)
+          if missing:
+              print("::warning::树内未声明: " + ",".join(missing))
+          PY2
+          echo "===== 已注入的 4.19 补丁 ====="
+          grep -n "susfs_is_mnt_devname_ksu" fs/namespace.c || echo "[x] namespace.c 补丁缺失"
+          grep -n "susfs_run_try_umount_for_current_mnt_ns" fs/namespace.c || echo "[x] namespace.c 补丁缺失"
 
       - name: 8f. ccache 缓存
         uses: actions/cache@v4
@@ -613,6 +706,13 @@ jobs:
             if [ -f "$f" ]; then
               echo "===== $f errors ====="
               grep -nE "error:|Error [0-9]+|undefined reference|implicit declaration|fatal error" "$f" | tail -30 || echo "no typical errors"
+              # 以注解输出首个错误 + 缺失符号错误：无需登录，公开 check-runs API 即可读到
+              grep -m1 -E "error:|fatal error:" "$f" | tr -d '\r' | cut -c1-260 | while IFS= read -r line; do
+                echo "::error title=$f::${line}"
+              done
+              grep -m8 -E "implicit declaration of function|undefined reference to" "$f" | tr -d '\r' | cut -c1-260 | while IFS= read -r line; do
+                echo "::error title=$f::${line}"
+              done
               FIRST=$(grep -m1 -E "error:|Error [0-9]+|fatal error" "$f" | tr -d '\r' | cut -c1-280 || true)
               if [ -n "$FIRST" ]; then echo "::error title=$f:: $FIRST"; fi
               echo "===== $f tail ====="
