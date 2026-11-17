@@ -618,6 +618,118 @@ jobs:
 
           PY
           grep -n "feature req id=" KernelSU/kernel/policy/feature.c || true
+      - name: 8p. 补齐 Nova 驱动所需 SUSFS 符号（4.19 兼容）
+        id: s8p
+        working-directory: kernel
+        run: |
+          set -ex
+          python3 - <<'PY'
+          p = "fs/dcache.c"
+          s = open(p, encoding="utf-8", errors="replace").read()
+          old = "current->susfs_task_state & TASK_STRUCT_NON_ROOT_USER_APP_PROC"
+          new = "susfs_is_current_non_root_user_app_proc()"
+          print("[i] dcache refs:", s.count(old))
+          s = s.replace(old, new)
+          open(p, "w", encoding="utf-8").write(s)
+
+          h = "include/linux/susfs.h"
+          t = open(h, encoding="utf-8", errors="replace").read()
+          if "workflow shim: Nova builtin" not in t:
+              decls = """
+          /* workflow shim: Nova builtin driver compatibility */
+          bool susfs_starts_with(const char *str, const char *prefix);
+          bool susfs_ends_with(const char *str, const char *suffix);
+          void susfs_set_current_proc_no_su(void);
+          void susfs_set_current_proc_umounted(void);
+          void susfs_set_current_proc_umounted_for_zygote_next(void);
+          void susfs_start_sdcard_monitor_fn(void);
+          void susfs_add_sus_path_loop(void __user *arg);
+          void susfs_enable_log(void __user *arg);
+          void susfs_set_avc_log_spoofing(void __user *arg);
+          void susfs_set_hide_sus_mnts_for_non_su_procs(void __user *arg);
+          void susfs_show_variant(void __user *arg);
+          void susfs_show_version(void __user *arg);
+          int susfs_add_sus_avd_allowed_by_type(u32 s_type, u32 t_type, u16 type, u32 orig_avd_allowed);
+          int susfs_add_sus_type(const char *secctx, u32 type_value);
+          int susfs_add_sus_map(void __user *arg);
+          void susfs_set_priority_uid_filter(void __user *arg);
+          void susfs_parse_priority_app_strings(void);
+          #endif /* KSU_SUSFS_H */
+          """
+              idx = t.rfind("#endif")
+              t = t[:idx] + decls
+              open(h, "w", encoding="utf-8").write(t)
+              print("[ok] susfs.h declarations added")
+
+          c = "fs/susfs.c"
+          b = open(c, encoding="utf-8", errors="replace").read()
+          if "workflow shim: Nova builtin" not in b:
+              shim = r"""
+          /* workflow shim: Nova builtin driver compatibility */
+          #include <linux/string.h>
+          #ifdef CONFIG_KSU_SUSFS
+          struct susfs_shim_ver_info { char buf[16]; int err; };
+          struct susfs_shim_var_info { char buf[16]; int err; };
+
+          bool susfs_starts_with(const char *str, const char *prefix) {
+              return str && prefix && !strncmp(str, prefix, strlen(prefix));
+          }
+          bool susfs_ends_with(const char *str, const char *suffix) {
+              size_t a, b;
+              if (!str || !suffix) return false;
+              a = strlen(str); b = strlen(suffix);
+              return a >= b && !strcmp(str + a - b, suffix);
+          }
+          void susfs_set_current_proc_no_su(void) {
+              susfs_set_current_non_root_user_app_proc();
+          }
+          void susfs_set_current_proc_umounted(void) {
+              susfs_set_current_non_root_user_app_proc();
+          }
+          void susfs_set_current_proc_umounted_for_zygote_next(void) {
+              susfs_set_current_non_root_user_app_proc();
+          }
+          void susfs_start_sdcard_monitor_fn(void) { }
+          void susfs_add_sus_path_loop(void __user *arg) {
+          #ifdef CONFIG_KSU_SUSFS_SUS_PATH
+              if (arg) susfs_add_sus_path((struct st_susfs_sus_path __user *)arg);
+          #endif
+          }
+          void susfs_enable_log(void __user *arg) {
+          #ifdef CONFIG_KSU_SUSFS_ENABLE_LOG
+              int on = 1;
+              if (arg && copy_from_user(&on, arg, sizeof(on))) on = 1;
+              susfs_set_log(on ? true : false);
+          #endif
+          }
+          void susfs_set_avc_log_spoofing(void __user *arg) { }
+          void susfs_set_hide_sus_mnts_for_non_su_procs(void __user *arg) { }
+          void susfs_show_variant(void __user *arg) {
+              struct susfs_shim_var_info info = {0};
+              strncpy(info.buf, SUSFS_VARIANT, sizeof(info.buf) - 1);
+              info.err = 0;
+              if (arg) copy_to_user(arg, &info, sizeof(info));
+          }
+          void susfs_show_version(void __user *arg) {
+              struct susfs_shim_ver_info info = {0};
+              strncpy(info.buf, SUSFS_VERSION, sizeof(info.buf) - 1);
+              info.err = 0;
+              if (arg) copy_to_user(arg, &info, sizeof(info));
+          }
+          int susfs_add_sus_avd_allowed_by_type(u32 s_type, u32 t_type, u16 type, u32 orig_avd_allowed) { return 0; }
+          int susfs_add_sus_type(const char *secctx, u32 type_value) { return 0; }
+          int susfs_add_sus_map(void __user *arg) { return 0; }
+          void susfs_set_priority_uid_filter(void __user *arg) { }
+          void susfs_parse_priority_app_strings(void) { }
+          #endif /* CONFIG_KSU_SUSFS */
+          """
+              b = b + shim
+              open(c, "w", encoding="utf-8").write(b)
+              print("[ok] fs/susfs.c shims added")
+          PY
+          grep -n "workflow shim: Nova builtin" include/linux/susfs.h fs/susfs.c
+          grep -n "susfs_is_current_non_root_user_app_proc" fs/dcache.c || true
+
       - name: 8o. 校验 SUSFS 树内集成 + 驱动配对 + 缺失符号
         if: env.KSU_SUSFS_MODE == 'on'
         working-directory: kernel
@@ -758,6 +870,7 @@ jobs:
           echo "8l reload       : ${{ steps.s8l.outcome }}"
           echo "8m text uids    : ${{ steps.s8m.outcome }}"
           echo "8n feat log     : ${{ steps.s8n.outcome }}"
+          echo "8p susfs shim   : ${{ steps.s8p.outcome }}"
           echo "9a build       : ${{ steps.build_a.outcome }}"
           echo "============================================="
           exit 0
