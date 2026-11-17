@@ -669,12 +669,10 @@ jobs:
           if "strncpy_from_user_nofault" not in v:
               shim_u = """
           /* workflow shim: Nova builtin sulog on 4.19 */
-          #ifndef KSU_HAS_STRNCPY_FROM_USER_NOFAULT
           static inline long strncpy_from_user_nofault(char *dst, const void __user *src, long count)
           {
               return strncpy_from_user(dst, (const char __user *)src, count);
           }
-          #endif
           """
               ui = v.rfind("#endif")
               v = v[:ui] + shim_u + v[ui:]
