@@ -510,24 +510,25 @@ jobs:
 
           PY
           grep -n "feature req id=" KernelSU/kernel/policy/feature.c || true
-      - name: 8o. 打 SUSFS 4.19 内核补丁
+      - name: 8o. SUSFS 头文件对接（树内已集成 susfs，不打补丁）
         if: env.KSU_SUSFS_MODE == 'on'
         working-directory: kernel
         run: |
           set -x
-          wget -q --tries=3 --timeout=60 -O /tmp/susfs.patch \
-            https://raw.githubusercontent.com/Ante0/susfs4ksu/kernel-4.19/kernel_patches/50_add_susfs_in_kernel-4.19.patch
-          test -s /tmp/susfs.patch || { echo "[x] patch download failed"; exit 1; }
-          echo "[i] patch size: $(wc -c < /tmp/susfs.patch)"
-          awk '/^diff --git/{skip=($0 ~ /task_mmu\.c/)} !skip' /tmp/susfs.patch > /tmp/susfs2.patch
-          mv /tmp/susfs2.patch /tmp/susfs.patch
-          echo "[i] after filter: $(wc -c < /tmp/susfs.patch)"
-          patch -p1 --forward --fuzz=3 --no-backup-if-mismatch < /tmp/susfs.patch > /tmp/patch.out 2>&1 || true
-          tail -20 /tmp/patch.out
-          echo "----- 关键文件检查 -----"
-          ls -l fs/susfs.c 2>/dev/null || echo "[x] fs/susfs.c 未生成"
-          grep -c "susfs" include/linux/susfs.h 2>/dev/null || echo "[x] susfs.h 缺失"
-          grep -c "susfs" fs/Makefile || true
+          ls -l fs/susfs.c include/linux/susfs.h
+          grep -q "susfs.o" fs/Makefile && echo "[ok] susfs 已在 fs/Makefile"
+          # 让 KSU 驱动看到内核侧 susfs 声明
+          if [ -f drivers/kernelsu/kernel_includes.h ]; then
+            grep -q "linux/susfs.h" drivers/kernelsu/kernel_includes.h || \
+              echo '#include <linux/susfs.h>' >> drivers/kernelsu/kernel_includes.h
+            tail -5 drivers/kernelsu/kernel_includes.h
+          fi
+          # 兜底：所有引用 susfs_ 的 KSU 源文件补 include
+          for f in $(grep -rl "susfs_" drivers/kernelsu --include=*.c --include=*.h 2>/dev/null); do
+            case "$f" in *kernel_includes.h) continue;; esac
+            grep -q "linux/susfs.h" "$f" || sed -i '1i #include <linux/susfs.h>' "$f"
+          done
+          echo "[i] 已补 include 的文件数: $(grep -rl 'linux/susfs.h' drivers/kernelsu | wc -l)"
 
       - name: 8f. ccache 缓存
         uses: actions/cache@v4
