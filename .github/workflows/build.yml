@@ -519,6 +519,9 @@ jobs:
             https://raw.githubusercontent.com/Ante0/susfs4ksu/kernel-4.19/kernel_patches/50_add_susfs_in_kernel-4.19.patch
           test -s /tmp/susfs.patch || { echo "[x] patch download failed"; exit 1; }
           echo "[i] patch size: $(wc -c < /tmp/susfs.patch)"
+          awk '/^diff --git/{skip=($0 ~ /task_mmu\.c/)} !skip' /tmp/susfs.patch > /tmp/susfs2.patch
+          mv /tmp/susfs2.patch /tmp/susfs.patch
+          echo "[i] after filter: $(wc -c < /tmp/susfs.patch)"
           patch -p1 --forward --fuzz=3 --no-backup-if-mismatch < /tmp/susfs.patch > /tmp/patch.out 2>&1 || true
           tail -20 /tmp/patch.out
           echo "----- 关键文件检查 -----"
