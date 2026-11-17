@@ -133,27 +133,39 @@ jobs:
           echo "===== trimmed tail (170-260) ====="
           sed -n "170,260p" build.sh || true
 
-      - name: 7. 预装 Nova KSU（带重试）
+      - name: 7. 预装 SukiSU-Ultra 驱动（f4863b20，与树 SUSFS v1.5.7 原生配对）
         id: s7
         working-directory: kernel
         run: |
           set -x
+          KSU_SHA=f4863b20cc8dc0f8cc67418980f022e43014b598
           ok=0
           for i in 1 2 3; do
-            if curl -LSsf --retry 3 --connect-timeout 20 --max-time 120 \
-                 https://raw.githubusercontent.com/SukiSU-Nova/SukiSU-Nova/main/kernel/setup.sh -o /tmp/ksu_setup.sh \
-               && [ -s /tmp/ksu_setup.sh ]; then
-              sh /tmp/ksu_setup.sh "$KSU_REF" && ok=1 && break
+            rm -rf /tmp/ksu /tmp/ksu.tar.gz
+            mkdir -p /tmp/ksu
+            if curl -LSsf --retry 3 --connect-timeout 20 --max-time 300 \
+                 "https://codeload.github.com/SukiSU-Nova/SukiSU-Nova/tar.gz/$KSU_SHA" -o /tmp/ksu.tar.gz \
+               && [ -s /tmp/ksu.tar.gz ] \
+               && tar xzf /tmp/ksu.tar.gz -C /tmp/ksu --strip-components=1 \
+               && [ -d /tmp/ksu/kernel ]; then
+              ok=1 && break
             fi
-            echo "[retry $i] ksu setup failed"
+            echo "[retry $i] ultra driver fetch failed"
             sleep 10
           done
-          test "$ok" = "1" || { echo "[x] ksu setup failed 3 times"; exit 1; }
-          test -d KernelSU/kernel || { echo "[x] KernelSU/kernel missing"; exit 1; }
-          cd KernelSU
-          git log -1 --format="KSU commit: %h %ad %s" --date=short
-          CNT=$(git rev-list --count HEAD 2>/dev/null || echo 0)
-          echo "predicted KSU_VERSION = $((30000 + CNT - 4001))"
+          test "$ok" = "1" || { echo "::error::Ultra 驱动下载失败"; exit 1; }
+          rm -rf KernelSU
+          mv /tmp/ksu KernelSU
+          echo "===== driver version markers ====="
+          grep -n "KSU_VERSION_API\|KSU_VERSION :=" KernelSU/kernel/Makefile | head -6 || true
+          echo "===== driver susfs 调用抽样 ====="
+          grep -n "susfs_add_sus_path" KernelSU/kernel/core_hook.c | head -3 || true
+          ln -sfn ../KernelSU/kernel drivers/kernelsu
+          grep -q kernelsu drivers/Makefile || echo 'obj-$(CONFIG_KSU) += kernelsu/' >> drivers/Makefile
+          grep -q 'drivers/kernelsu/Kconfig' drivers/Kconfig || sed -i '/^endmenu/i\source "drivers/kernelsu/Kconfig"' drivers/Kconfig
+          ls -ld drivers/kernelsu
+          tail -3 drivers/Makefile
+          grep -n kernelsu drivers/Kconfig
 
       - name: 8. 停用 Nova 缺失的 hook（确定性）
         id: s8
@@ -270,18 +282,18 @@ jobs:
           fi
           echo '===== 当前 KSU 树文件清单（前 30）====='
           ls KernelSU/kernel | head -30
-      - name: 8h. main 树的 4.19 兼容补丁（MODULE_IMPORT_NS 不存在）
+      - name: 8h. 4.19 兼容补丁（MODULE_IMPORT_NS 在 4.19 不存在）
         id: s8h
         working-directory: kernel
         run: |
           set -ex
-          if [ -f KernelSU/kernel/core/init.c ]; then
-            grep -c 'MODULE_IMPORT_NS(' KernelSU/kernel/core/init.c || true
-            sed -i 's|^MODULE_IMPORT_NS(.*);$|/* 4.19: MODULE_IMPORT_NS 不存在，置空 */|' KernelSU/kernel/core/init.c
-            grep -n 'MODULE_IMPORT_NS' KernelSU/kernel/core/init.c || echo '[ok] 已清空'
-          else
-            echo '[skip] core/init.c 不存在（builtin 树）'
-          fi
+          for f in KernelSU/kernel/core/init.c KernelSU/kernel/ksu.c KernelSU/kernel/ksud.c; do
+            [ -f "$f" ] || continue
+            echo "== $f"
+            grep -n 'MODULE_IMPORT_NS' "$f" || true
+            sed -i 's|^[[:space:]]*MODULE_IMPORT_NS(.*);[[:space:]]*$|/* 4.19: MODULE_IMPORT_NS 不存在，置空 */|' "$f"
+            grep -n 'MODULE_IMPORT_NS' "$f" || echo "[ok] 已清空 $f"
+          done
       - name: 8e. execve 走官方总入口
         id: s8e
         working-directory: kernel
@@ -518,15 +530,18 @@ jobs:
 
           PY
           grep -n "feature req id=" KernelSU/kernel/policy/feature.c || true
-      - name: 8o. 校验 SUSFS 树内集成
+      - name: 8o. 校验 SUSFS 树内集成 + 驱动配对
         if: env.KSU_SUSFS_MODE == 'on'
         working-directory: kernel
         run: |
           set -x
           ls -l fs/susfs.c include/linux/susfs.h include/linux/susfs_def.h
           grep -q "susfs.o" fs/Makefile && echo "[ok] fs/Makefile 已含 susfs.o"
-          grep -n "CONFIG_KSU_SUSFS" drivers/kernelsu/kernel_includes.h | head -3
-          echo "[i] 说明：include 已有条件保护，靠 8c 打开 CONFIG 生效"
+          grep -m1 'SUSFS_VERSION' include/linux/susfs.h || true
+          echo "===== 驱动实际调用的 susfs 符号 ====="
+          grep -rho "susfs_[a-z0-9_]*(" drivers/kernelsu --include=*.c | sort -u | head -40
+          echo "===== 驱动里是否残留 v2 专有调用（应为空） ====="
+          grep -rn "susfs_add_sus_map\|susfs_enable_log\|susfs_get_enabled_features\|susfs_show_version\|susfs_set_priority_uid_filter\|susfs_start_sdcard_monitor_fn" drivers/kernelsu --include=*.c || echo "[ok] 无 v2 专有调用"
 
       - name: 8f. ccache 缓存
         uses: actions/cache@v4
@@ -555,23 +570,28 @@ jobs:
           echo "[i] retry with KPM=off"
           bash build.sh cmi ksu 2>&1 | tee ../build.log
 
-      - name: 10. 产物自检
+      - name: 10. 产物自检（含 SUSFS 落盘判定）
         working-directory: kernel
         run: |
-          ls -lh Kernel_*.zip || { echo "[x] 没有 zip 产物，编译未成功"; exit 1; }
+          ls -lh Kernel_*.zip || { echo "::error::没有 zip 产物，编译未成功"; exit 1; }
           for f in ../build_a.log ../build.log; do
             [ -f "$f" ] || continue
             echo "===== $f ====="
-            grep -m2 "SukiSU-Nova version:" "$f" || true
+            grep -m2 -E "SukiSU-Ultra version|SukiSU-Nova version|Formatted version" "$f" || true
             grep -E "AOSP Build successfully|MIUI Build successfully" "$f" || true
             grep -m2 "extra config" "$f" || true
+            grep -m4 -i "susfs" "$f" || true
           done
+          echo "===== out/.config 关键项 ====="
+          grep -E "^CONFIG_KSU(_SUSFS[A-Z_]*)?=" out/.config | head -30 || true
           for z in Kernel_*.zip; do
             unzip -p "$z" kernels/Image > /tmp/img.bin
             echo "--- $z"
             echo "  size : $(stat -c%s /tmp/img.bin)"
             echo "  ver  : $(strings /tmp/img.bin | grep -m1 "Linux version")"
-            echo "  ksu  : $(strings /tmp/img.bin | grep -m1 "SukiSU-Nova" || true)"
+            echo "  ksu  : $(strings /tmp/img.bin | grep -m1 -E "SukiSU-Ultra|SukiSU-Nova" || true)"
+            echo "  susfs: $(strings /tmp/img.bin | grep -m1 -i "susfs" || echo MISSING)"
+            if ! strings /tmp/img.bin | grep -qi "susfs"; then echo "::warning::Image 里没有 susfs 字样，SUSFS 可能未编入"; fi
           done
 
       - name: 11. 收集产物
@@ -583,7 +603,7 @@ jobs:
           find out -name "*.ko" -print0 2>/dev/null | xargs -0 -r cp --parents -t ../artifacts/modules/ 2>/dev/null || true
           cp ../build.log ../build_a.log ../artifacts/ 2>/dev/null || true
 
-      - name: 12. 失败时捞错误
+      - name: 12. 失败时捞错误（并发 error 注解）
         if: failure()
         run: |
           echo "===== 工作区 ====="
@@ -592,9 +612,11 @@ jobs:
           for f in build_a.log build.log; do
             if [ -f "$f" ]; then
               echo "===== $f errors ====="
-              grep -nE "error:|Error [0-9]+|undefined reference|implicit declaration|fatal error" "$f" | tail -25 || echo "no typical errors"
+              grep -nE "error:|Error [0-9]+|undefined reference|implicit declaration|fatal error" "$f" | tail -30 || echo "no typical errors"
+              FIRST=$(grep -m1 -E "error:|Error [0-9]+|fatal error" "$f" | tr -d '\r' | cut -c1-280 || true)
+              if [ -n "$FIRST" ]; then echo "::error title=$f:: $FIRST"; fi
               echo "===== $f tail ====="
-              tail -20 "$f"
+              tail -25 "$f"
             else
               echo "[!] $f missing -> build never started"
             fi
