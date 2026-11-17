@@ -28,7 +28,7 @@ on:
       susfs_mode:
         description: "SUSFS 开关"
         required: true
-        default: "off"
+        default: "on"
         type: choice
         options: ["off", "on"]
       kpm_mode:
@@ -510,6 +510,22 @@ jobs:
 
           PY
           grep -n "feature req id=" KernelSU/kernel/policy/feature.c || true
+      - name: 8o. 打 SUSFS 4.19 内核补丁
+        if: env.KSU_SUSFS_MODE == 'on'
+        working-directory: kernel
+        run: |
+          set -x
+          wget -q --tries=3 --timeout=60 -O /tmp/susfs.patch \
+            https://raw.githubusercontent.com/Ante0/susfs4ksu/kernel-4.19/kernel_patches/50_add_susfs_in_kernel-4.19.patch
+          test -s /tmp/susfs.patch || { echo "[x] patch download failed"; exit 1; }
+          echo "[i] patch size: $(wc -c < /tmp/susfs.patch)"
+          patch -p1 --forward --fuzz=3 --no-backup-if-mismatch < /tmp/susfs.patch > /tmp/patch.out 2>&1 || true
+          tail -20 /tmp/patch.out
+          echo "----- 关键文件检查 -----"
+          ls -l fs/susfs.c 2>/dev/null || echo "[x] fs/susfs.c 未生成"
+          grep -c "susfs" include/linux/susfs.h 2>/dev/null || echo "[x] susfs.h 缺失"
+          grep -c "susfs" fs/Makefile || true
+
       - name: 8f. ccache 缓存
         uses: actions/cache@v4
         with:
