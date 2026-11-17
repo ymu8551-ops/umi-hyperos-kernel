@@ -6,6 +6,10 @@ on:
       - main
   workflow_dispatch:
     inputs:
+      ksu_sha:
+        description: "Nova 驱动提交SHA；builtin 分支 4bec532d = API 30000"
+        required: true
+        default: "4bec532dd447e2852aa8932afa768255350c103a"
       ksu_ref:
         description: "builtin=手动hook树(A路线)；v3.0.0=main树(B路线)"
         required: true
@@ -60,15 +64,15 @@ jobs:
     timeout-minutes: 300
     env:
       KERNEL_REF: ${{ github.event.inputs.kernel_ref || 'android15-lineage22-mod-upgrade-susfs' }}
-      KSU_REF: ${{ github.event.inputs.ksu_ref }}
-      HOOK_MODE: ${{ github.event.inputs.hook_mode }}
-      HOOK_PATCH: ${{ github.event.inputs.hook_patch }}
-      KSU_KPROBES: ${{ github.event.inputs.kprobe_mode }}
-      KSU_SUSFS_MODE: ${{ github.event.inputs.susfs_mode }}
-      KSU_KPM_MODE: ${{ github.event.inputs.kpm_mode }}
-      VARIANT: ${{ github.event.inputs.variant }}
-      KPM_PATCH: ${{ github.event.inputs.kpm_patch }}
-      KSU_SHA: ${{ github.event.inputs.ksu_sha || '329b7f59dc84d79ac27a3487cf21d90c01cdf656' }}
+      KSU_REF: ${{ github.event.inputs.ksu_ref || 'builtin' }}
+      HOOK_MODE: ${{ github.event.inputs.hook_mode || 'auto' }}
+      HOOK_PATCH: ${{ github.event.inputs.hook_patch || 'none' }}
+      KSU_KPROBES: ${{ github.event.inputs.kprobe_mode || 'off' }}
+      KSU_SUSFS_MODE: ${{ github.event.inputs.susfs_mode || 'on' }}
+      KSU_KPM_MODE: ${{ github.event.inputs.kpm_mode || 'off' }}
+      VARIANT: ${{ github.event.inputs.variant || 'miui' }}
+      KPM_PATCH: ${{ github.event.inputs.kpm_patch || '0.12.0' }}
+      KSU_SHA: ${{ github.event.inputs.ksu_sha || '4bec532dd447e2852aa8932afa768255350c103a' }}
     steps:
       - name: 1. 拉内核源
         uses: actions/checkout@v4
@@ -119,6 +123,7 @@ jobs:
         working-directory: kernel
         run: |
           set -x
+          test -n "$KPM_PATCH" || { echo "::error::KPM_PATCH is empty, patch_linux URL will 404"; exit 1; }
           sed -i "s#^\( *\)curl -LSs .*setup\.sh.*#\1echo [i] KSU-preinstalled#" build.sh
           sed -i "s#SukiSU_KernelPatch_patch/releases/download/0.12.0/#SukiSU_KernelPatch_patch/releases/download/${KPM_PATCH}/#" build.sh
           grep -n "curl -LSs" build.sh || echo "[ok] build.sh setup disabled"
@@ -138,7 +143,7 @@ jobs:
           echo "===== trimmed tail (170-260) ====="
           sed -n "170,260p" build.sh || true
 
-      - name: 7. 预装 SukiSU-Nova 驱动（329b7f59，与 upgrade-susfs 分支 SUSFS v1.5.9 配对）
+      - name: 7. 预装 SukiSU-Nova builtin 驱动（4bec532d，API 30000）
         id: s7
         working-directory: kernel
         run: |
@@ -171,6 +176,15 @@ jobs:
           ls -ld drivers/kernelsu
           tail -3 drivers/Makefile
           grep -n kernelsu drivers/Kconfig
+
+      - name: 7b. 校验 Nova 驱动（必须 API 30000 / com.sukisu.nova）
+        id: s7b
+        working-directory: kernel
+        run: |
+          set -ex
+          grep -E '^VERSION_BASE[[:space:]]*:=[[:space:]]*30000' KernelSU/kernel/Makefile
+          grep -E '^KSU_PACKAGE_NAME[[:space:]]*\?=[[:space:]]*com\.sukisu\.nova' KernelSU/kernel/Makefile
+          echo "[ok] Nova driver API 30000 confirmed"
 
       - name: 8. 停用 Nova 缺失的 hook（确定性）
         id: s8
@@ -730,6 +744,7 @@ jobs:
           echo "6  setup off   : ${{ steps.s6.outcome }}"
           echo "6b trim        : ${{ steps.s6b.outcome }}"
           echo "7  ksu setup   : ${{ steps.s7.outcome }}"
+          echo "7b driver api  : ${{ steps.s7b.outcome }}"
           echo "8  hook off    : ${{ steps.s8.outcome }}"
           echo "8b static_call : ${{ steps.s8b.outcome }}"
           echo "8c extra cfg   : ${{ steps.s8c.outcome }}"
