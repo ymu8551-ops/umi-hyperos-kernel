@@ -1,4 +1,4 @@
-name: umi-full-nova
+name: cmi-full-nova
 
 on:
   workflow_dispatch:
@@ -524,7 +524,7 @@ jobs:
           set -o pipefail
           export CCACHE_DIR="$HOME/.cache/ccache_mikernel"
           ccache -M 4G || true
-          bash build.sh umi ksu 2>&1 | tee ../build_a.log
+          bash build.sh cmi ksu 2>&1 | tee ../build_a.log
 
       - name: 9b. 若 9a 失败则关掉 KPM 重试
         if: steps.build_a.outcome == 'failure'
@@ -535,7 +535,7 @@ jobs:
           set -o pipefail
           export CCACHE_DIR="$HOME/.cache/ccache_mikernel"
           echo "[i] retry with KPM=off"
-          bash build.sh umi ksu 2>&1 | tee ../build.log
+          bash build.sh cmi ksu 2>&1 | tee ../build.log
 
       - name: 10. 产物自检
         working-directory: kernel
@@ -611,6 +611,6 @@ jobs:
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: umi-nova-${{ github.run_id }}-${{ env.KSU_REF }}-${{ env.KSU_SUSFS_MODE }}
+          name: cmi-nova-${{ github.run_id }}-${{ env.KSU_REF }}-${{ env.KSU_SUSFS_MODE }}
           path: artifacts
           retention-days: 30
